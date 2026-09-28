@@ -68,7 +68,7 @@ For each selected device it records:
 - Driver provider, version, and date
 - INF name and driver service
 
-It then exports the driver package, generates an install script, and zips everything into a portable backup.
+It then exports the driver package, generates an install script, and zips everything into a portable backup. If the device uses a built-in Windows driver, only the device information is saved (see [Info-Only Captures](#info-only-captures)).
 
 Child devices created by a USB device (for example the COM port of a USB serial adapter, or the HID interface of a scanner) are also listed, so you can capture the exact device whose driver you need.
 
@@ -86,7 +86,7 @@ Works like option 1 but watches all Plug and Play devices, not only USB. Use it 
 
 Installs a saved driver on the current machine.
 
-- Lists every package in the repository
+- Lists every package that has driver files (info-only captures are skipped)
 - Installs with Microsoft PnPUtil
 - Supports packages that contain multiple INF files
 - Reports success, failure, or a required reboot
@@ -103,6 +103,11 @@ Shows a quick inventory of saved drivers:
 2. Zebra Printer
    Version: 8.6.5.0
    INF: oem112.inf
+
+3. USB Mass Storage Device
+   Version: 10.0.22621.1
+   INF: usbstor.inf
+   Info only (no driver files)
 ```
 
 ### 5. Extract Installed Driver
@@ -252,6 +257,18 @@ DriverFiles\
 
 Copy it to a network share, OneDrive, a technician toolkit, or long-term storage. Extract it anywhere and run `InstallDriver.cmd` to install.
 
+### Info-Only Captures
+
+When a device uses a built-in Windows driver, or has no driver installed yet, there is nothing to install. The toolkit still saves `DriverSummary.txt` with the device details and hardware IDs, but skips `DriverFiles`, `InstallDriver.cmd`, and `DriverBackup.zip`.
+
+```text
+Drivers
+└── USB Mass Storage Device
+    └── DriverSummary.txt
+```
+
+The hardware IDs in the summary are still useful for tracking down a vendor driver later.
+
 ## How It Works
 
 ### Device Capture
@@ -297,13 +314,13 @@ Built-in Windows drivers (such as `usb.inf` or `msports.inf`) can't be exported,
 | Label | Meaning |
 |-------|---------|
 | `oem45.inf, third-party` | A vendor driver. This is what the toolkit exports. |
-| `usbstor.inf, built-in Windows driver` | Ships with Windows. Nothing to export. |
+| `usbstor.inf, built-in Windows driver` | Ships with Windows. Only device info is saved. |
 | `no driver yet` | Windows is still installing the driver. Keep waiting. |
 
 ### Tips
 
 - Wait until the device shows a driver before pressing Enter. First-time installs, especially from Windows Update, can take a minute or more.
-- USB flash drives and most keyboards and mice use built-in Windows drivers. They are good for checking that detection works, but there is nothing to export.
+- USB flash drives and most keyboards and mice use built-in Windows drivers. They are good for checking that detection works, but only their device info is saved.
 - Many devices create more than one entry. A USB serial adapter, for example, shows both the USB device and its COM port, often with separate drivers. Select both (such as `1,2`) to keep the full set.
 - Running in the PowerShell ISE? Live key presses aren't supported there, so the capture screen asks you to press Enter to refresh, **S** to select, or **Q** to return instead. A regular PowerShell window is recommended.
 - If Windows installs a generic driver, install the vendor driver first, then capture.

@@ -54,33 +54,6 @@ function Get-SignedDriverInfo {
         Select-Object -First 1
 }
 
-function Test-IsUsbDevice {
-
-    param([string]$InstanceId)
-
-    # Walk up the device tree so child devices of a USB device (COM ports,
-    # HID interfaces, storage volumes, etc.) are also treated as USB.
-    $Current = $InstanceId
-
-    for ($Depth = 0; $Depth -lt 6 -and $Current; $Depth++) {
-
-        if ($Current -match '^USB') {
-            return $true
-        }
-
-        try {
-            $Current = (Get-PnpDeviceProperty `
-                -InstanceId $Current `
-                -KeyName DEVPKEY_Device_Parent).Data
-        }
-        catch {
-            return $false
-        }
-    }
-
-    return $false
-}
-
 function Export-DriverFiles {
 
     param(
@@ -130,17 +103,20 @@ function Export-DriverPackage {
 
     $DeviceFolder = Join-Path $DriversRoot $SafeName
     $DriverFilesFolder = Join-Path $DeviceFolder "DriverFiles"
+    $SummaryFile = Join-Path $DeviceFolder "DriverSummary.txt"
+    $InstallCMD = Join-Path $DeviceFolder "InstallDriver.cmd"
+    $ZipFile = Join-Path $DeviceFolder "DriverBackup.zip"
 
-    # Start from a clean DriverFiles folder so a re-capture never mixes
-    # files from an older driver version with the new one.
-    if (Test-Path -LiteralPath $DriverFilesFolder) {
-        Remove-Item -LiteralPath $DriverFilesFolder -Recurse -Force
+    # Start clean so a re-capture never mixes files from an older driver
+    # version, or leaves an old installer behind if this export fails.
+    foreach ($OldItem in $DriverFilesFolder, $InstallCMD, $ZipFile) {
+        if (Test-Path -LiteralPath $OldItem) {
+            Remove-Item -LiteralPath $OldItem -Recurse -Force
+        }
     }
 
     New-Item -ItemType Directory -Path $DeviceFolder -Force | Out-Null
     New-Item -ItemType Directory -Path $DriverFilesFolder -Force | Out-Null
-
-    $SummaryFile = Join-Path $DeviceFolder "DriverSummary.txt"
 
     $Summary = @()
 
@@ -252,7 +228,20 @@ function Export-DriverPackage {
 
     $Summary | Out-File -LiteralPath $SummaryFile -Encoding UTF8
 
-    $InstallCMD = Join-Path $DeviceFolder "InstallDriver.cmd"
+    # Nothing to install (built-in driver, or no driver yet): keep the
+    # device info only, without an empty installer and ZIP.
+    if ($ExportError) {
+
+        Remove-Item -LiteralPath $DriverFilesFolder -Recurse -Force
+
+        Write-Host ""
+        Write-Host "Device Info Saved (no driver files to export)"
+        Write-Host "Output Folder:"
+        Write-Host $DeviceFolder
+        Write-Host ""
+
+        return
+    }
 
     # %~dp0 is the folder the .cmd lives in, so this works when launched via
     # "Run as administrator" (which starts in C:\Windows\System32).
@@ -270,12 +259,6 @@ pnputil /add-driver "%~dp0DriverFiles\*.inf" /subdirs /install
 pause
 '@ | Out-File -LiteralPath $InstallCMD -Encoding ASCII
 
-    $ZipFile = Join-Path $DeviceFolder "DriverBackup.zip"
-
-    if (Test-Path -LiteralPath $ZipFile) {
-        Remove-Item -LiteralPath $ZipFile -Force
-    }
-
     $ZipContents = Get-ChildItem -LiteralPath $DeviceFolder |
         Select-Object -ExpandProperty FullName
 
@@ -291,28 +274,155 @@ pause
     Write-Host ""
 }
 
-function Get-DriverLabel {
+# Device scans are slow (Windows device queries can take a second or more
+# each), so capture runs them in a background runspace and keeps the screen
+# free to respond to key presses. Queries are batched to keep scans short.
+$DeviceScanScript = {
 
-    param([string]$InstanceId)
+    param(
+        $Baseline,
+        [bool]$USBOnly,
+        $UsbCache
+    )
+
+    function Get-PropertyMap {
+
+        param(
+            [string[]]$Ids,
+            [string]$KeyName
+        )
+
+        $Map = @{}
+
+        if ($Ids.Count -eq 0) {
+            return $Map
+        }
+
+        foreach ($Property in Get-PnpDeviceProperty -InstanceId $Ids -KeyName $KeyName -ErrorAction SilentlyContinue) {
+            $Map[$Property.InstanceId] = $Property.Data
+        }
+
+        return $Map
+    }
+
+    $Present = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+
+    $New = @($Present | Where-Object {
+        !$Baseline.ContainsKey($_.InstanceId)
+    })
+
+    if ($USBOnly) {
+
+        # Walk up the device tree (one batched lookup per level) so child
+        # devices of a USB device, such as COM ports and HID interfaces,
+        # count as USB too. Results are cached between scans.
+        $Ancestor = @{}
+
+        foreach ($Device in $New) {
+            if (!$UsbCache.ContainsKey($Device.InstanceId)) {
+                $Ancestor[$Device.InstanceId] = $Device.InstanceId
+            }
+        }
+
+        for ($Depth = 0; $Depth -lt 6 -and $Ancestor.Count -gt 0; $Depth++) {
+
+            foreach ($Id in @($Ancestor.Keys)) {
+                if ($Ancestor[$Id] -match '^USB') {
+                    $UsbCache[$Id] = $true
+                    $Ancestor.Remove($Id)
+                }
+            }
+
+            $Parents = Get-PropertyMap @($Ancestor.Values | Select-Object -Unique) 'DEVPKEY_Device_Parent'
+
+            foreach ($Id in @($Ancestor.Keys)) {
+                if ($Parents[$Ancestor[$Id]]) {
+                    $Ancestor[$Id] = $Parents[$Ancestor[$Id]]
+                }
+                else {
+                    $UsbCache[$Id] = $false
+                    $Ancestor.Remove($Id)
+                }
+            }
+        }
+
+        foreach ($Id in $Ancestor.Keys) {
+            $UsbCache[$Id] = $false
+        }
+
+        $New = @($New | Where-Object {
+            $UsbCache[$_.InstanceId]
+        })
+    }
+
+    $InfPaths = Get-PropertyMap @($New | ForEach-Object { $_.InstanceId }) 'DEVPKEY_Device_DriverInfPath'
+
+    $Devices = foreach ($Device in $New) {
+
+        $INF = $InfPaths[$Device.InstanceId]
+
+        $Label = if (!$INF) {
+            "no driver yet"
+        }
+        elseif ($INF -match '^oem\d+\.inf$') {
+            "$INF, third-party"
+        }
+        else {
+            "$INF, built-in Windows driver"
+        }
+
+        [PSCustomObject]@{
+            Device = $Device
+            Label  = $Label
+        }
+    }
+
+    [PSCustomObject]@{
+        PresentIds = @($Present | ForEach-Object { $_.InstanceId })
+        Devices    = @($Devices)
+    }
+}
+
+# One background runspace is reused for the whole session
+$DeviceScanner = $null
+$DeviceScanPending = $null
+
+function Start-DeviceScan {
+
+    param(
+        [hashtable]$Baseline,
+        [bool]$USBOnly,
+        $UsbCache
+    )
+
+    if (!$script:DeviceScanner) {
+        $script:DeviceScanner = [powershell]::Create()
+        $script:DeviceScanner.Runspace = [runspacefactory]::CreateRunspace()
+        $script:DeviceScanner.Runspace.Open()
+    }
+
+    $script:DeviceScanner.Commands.Clear()
+
+    [void]$script:DeviceScanner.AddScript($DeviceScanScript).
+        AddArgument($Baseline.Clone()).
+        AddArgument($USBOnly).
+        AddArgument($UsbCache)
+
+    $script:DeviceScanPending = $script:DeviceScanner.BeginInvoke()
+}
+
+function Receive-DeviceScan {
+
+    # Returns the scan result, or $null if the scan failed
+    $Pending = $script:DeviceScanPending
+    $script:DeviceScanPending = $null
 
     try {
-        $INF = (Get-PnpDeviceProperty `
-            -InstanceId $InstanceId `
-            -KeyName DEVPKEY_Device_DriverInfPath).Data
+        return ($script:DeviceScanner.EndInvoke($Pending) | Select-Object -Last 1)
     }
     catch {
-        $INF = $null
+        return $null
     }
-
-    if (!$INF) {
-        return "no driver yet"
-    }
-
-    if ($INF -match '^oem\d+\.inf$') {
-        return "$INF, third-party"
-    }
-
-    return "$INF, built-in Windows driver"
 }
 
 function Read-MultiSelection {
@@ -349,6 +459,14 @@ function Capture-NewDevice {
 
     $Title = if ($USBOnly) { "CAPTURE NEW USB DEVICE" } else { "CAPTURE ANY NEW DEVICE" }
 
+    Clear-Host
+    Write-Host "Taking a snapshot of connected devices..."
+
+    # A scan left running by a previous capture has stale results; discard it
+    if ($script:DeviceScanPending) {
+        Receive-DeviceScan | Out-Null
+    }
+
     # Everything present now is ignored. A device that is unplugged while
     # watching drops out of this baseline, so plugging it back in counts as new.
     $Baseline = @{}
@@ -357,8 +475,12 @@ function Capture-NewDevice {
         $Baseline[$Device.InstanceId] = $true
     }
 
-    $UsbCache = @{}
+    $UsbCache = [hashtable]::Synchronized(@{})
+    $NewDevices = @()
+    $Labels = @()
+    $Indexes = @()
     $LastScreen = $null
+    $NextScan = Get-Date
 
     # [Console]::KeyAvailable does not work in the PowerShell ISE, so fall
     # back to Read-Host prompts there.
@@ -375,30 +497,33 @@ function Capture-NewDevice {
 
     while ($true) {
 
-        $Present = @(Get-PnpDevice -PresentOnly)
-        $PresentIds = @{}
-
-        foreach ($Device in $Present) {
-            $PresentIds[$Device.InstanceId] = $true
+        if (!$script:DeviceScanPending -and (Get-Date) -ge $NextScan) {
+            Start-DeviceScan $Baseline $USBOnly $UsbCache
         }
 
-        foreach ($Id in @($Baseline.Keys)) {
-            if (!$PresentIds.ContainsKey($Id)) {
-                $Baseline.Remove($Id)
-            }
-        }
+        if ($script:DeviceScanPending -and $script:DeviceScanPending.IsCompleted) {
 
-        $NewDevices = @($Present | Where-Object {
-            !$Baseline.ContainsKey($_.InstanceId)
-        })
+            $Result = Receive-DeviceScan
+            $NextScan = (Get-Date).AddSeconds(1)
 
-        if ($USBOnly) {
-            $NewDevices = @($NewDevices | Where-Object {
-                if (!$UsbCache.ContainsKey($_.InstanceId)) {
-                    $UsbCache[$_.InstanceId] = Test-IsUsbDevice $_.InstanceId
+            # An empty device list means the scan failed; keep the old results
+            if ($Result -and $Result.PresentIds.Count -gt 0) {
+
+                $PresentIds = @{}
+
+                foreach ($Id in $Result.PresentIds) {
+                    $PresentIds[$Id] = $true
                 }
-                $UsbCache[$_.InstanceId]
-            })
+
+                foreach ($Id in @($Baseline.Keys)) {
+                    if (!$PresentIds.ContainsKey($Id)) {
+                        $Baseline.Remove($Id)
+                    }
+                }
+
+                $NewDevices = @($Result.Devices | ForEach-Object { $_.Device })
+                $Labels = @($Result.Devices | ForEach-Object { $_.Label })
+            }
         }
 
         $Lines = @()
@@ -414,7 +539,7 @@ function Capture-NewDevice {
                 $Device.InstanceId
             }
 
-            $Lines += "$($i+1). $DisplayName  [$(Get-DriverLabel $Device.InstanceId)]"
+            $Lines += "$($i+1). $DisplayName  [$($Labels[$i])]"
         }
 
         # Only redraw when something changed, so the screen doesn't flicker
@@ -457,25 +582,19 @@ function Capture-NewDevice {
 
         if ($LiveKeys) {
 
-            # Listen for keys for ~2 seconds, then refresh the device list
-            $Until = (Get-Date).AddSeconds(2)
+            if ([Console]::KeyAvailable) {
 
-            while (!$Action -and (Get-Date) -lt $Until) {
+                $Key = [Console]::ReadKey($true).Key
 
-                if ([Console]::KeyAvailable) {
-
-                    $Key = [Console]::ReadKey($true).Key
-
-                    if ($Key -eq 'Q' -or $Key -eq 'Escape') {
-                        $Action = "Quit"
-                    }
-                    elseif ($Key -eq 'Enter') {
-                        $Action = "Select"
-                    }
+                if ($Key -eq 'Q' -or $Key -eq 'Escape') {
+                    $Action = "Quit"
                 }
-                else {
-                    Start-Sleep -Milliseconds 100
+                elseif ($Key -eq 'Enter') {
+                    $Action = "Select"
                 }
+            }
+            else {
+                Start-Sleep -Milliseconds 100
             }
         }
         else {
@@ -492,15 +611,13 @@ function Capture-NewDevice {
             $LastScreen = $null
         }
 
+        # Any scan still running when we leave finishes in the background
+        # and is discarded by the next capture, so leaving is instant.
         if ($Action -eq "Quit") {
             return
         }
 
-        if ($Action -eq "Select") {
-
-            if ($NewDevices.Count -eq 0) {
-                continue
-            }
+        if ($Action -eq "Select" -and $NewDevices.Count -gt 0) {
 
             Write-Host ""
 
@@ -516,9 +633,12 @@ function Capture-NewDevice {
         }
     }
 
-    foreach ($Index in $Indexes) {
+    $Selected = @($Indexes | ForEach-Object { $NewDevices[$_] })
 
-        $SelectedDevice = $NewDevices[$Index]
+    foreach ($SelectedDevice in $Selected) {
+
+        Write-Host ""
+        Write-Host "Capturing $($SelectedDevice.FriendlyName)..."
 
         $DriverInfo = Get-SignedDriverInfo $SelectedDevice.InstanceId
 
@@ -532,7 +652,10 @@ function Install-Driver {
 
     Clear-Host
 
-    $Drivers = @(Get-ChildItem -LiteralPath $DriversRoot -Directory)
+    # Skip info-only captures (built-in drivers), which have nothing to install
+    $Drivers = @(Get-ChildItem -LiteralPath $DriversRoot -Directory | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_.FullName "DriverFiles")
+    })
 
     if ($Drivers.Count -eq 0) {
 
@@ -638,6 +761,11 @@ function View-Repository {
         Write-Host "$Counter. $($Folder.Name)"
         Write-Host "   Version: $Version"
         Write-Host "   INF: $INF"
+
+        if (!(Test-Path -LiteralPath (Join-Path $Folder.FullName "DriverFiles"))) {
+            Write-Host "   Info only (no driver files)" -ForegroundColor DarkGray
+        }
+
         Write-Host ""
 
         $Counter++
