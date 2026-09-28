@@ -425,20 +425,23 @@ function Receive-DeviceScan {
     }
 }
 
-function Read-MultiSelection {
+function Get-SelectionIndexes {
 
+    # Turns "1" or "1,3" into zero-based indexes. Returns an empty list and
+    # prints a warning if anything is out of range or not a number.
     param(
-        [string]$Prompt,
+        [string]$Text,
         [int]$Max
     )
 
     $Indexes = @()
 
-    foreach ($Part in ((Read-Host $Prompt) -split ',')) {
+    foreach ($Part in ($Text -split ',')) {
 
         $Number = 0
 
         if (![int]::TryParse($Part.Trim(), [ref]$Number) -or $Number -lt 1 -or $Number -gt $Max) {
+            Write-Host ""
             Write-Host "Invalid selection: '$($Part.Trim())'" -ForegroundColor Yellow
             return @()
         }
@@ -458,6 +461,7 @@ function Capture-NewDevice {
     )
 
     $Title = if ($USBOnly) { "CAPTURE NEW USB DEVICE" } else { "CAPTURE ANY NEW DEVICE" }
+    $SelectPrompt = "Select device(s), e.g. 1 or 1,3 (Q = main menu): "
 
     Clear-Host
     Write-Host "Taking a snapshot of connected devices..."
@@ -476,9 +480,11 @@ function Capture-NewDevice {
     }
 
     $UsbCache = [hashtable]::Synchronized(@{})
+    $Order = @()
     $NewDevices = @()
     $Labels = @()
     $Indexes = @()
+    $Typed = ""
     $LastScreen = $null
     $NextScan = Get-Date
 
@@ -521,8 +527,24 @@ function Capture-NewDevice {
                     }
                 }
 
-                $NewDevices = @($Result.Devices | ForEach-Object { $_.Device })
-                $Labels = @($Result.Devices | ForEach-Object { $_.Label })
+                # Keep devices in the order they first appeared, so the
+                # numbers don't shift while someone is typing a selection.
+                $Found = @{}
+
+                foreach ($Entry in $Result.Devices) {
+                    $Found[$Entry.Device.InstanceId] = $Entry
+                }
+
+                $Order = @($Order | Where-Object { $Found.ContainsKey($_) })
+
+                foreach ($Entry in $Result.Devices) {
+                    if ($Order -notcontains $Entry.Device.InstanceId) {
+                        $Order += $Entry.Device.InstanceId
+                    }
+                }
+
+                $NewDevices = @($Order | ForEach-Object { $Found[$_].Device })
+                $Labels = @($Order | ForEach-Object { $Found[$_].Label })
             }
         }
 
@@ -554,7 +576,7 @@ function Capture-NewDevice {
             Write-Host "========================================="
             Write-Host ""
             Write-Host "Plug in the device now. If it is already plugged in, unplug it and plug it back in."
-            Write-Host "Wait until the device you want shows its driver, then press Enter to select it."
+            Write-Host "Wait until the device you want shows its driver, then type its number."
             Write-Host ""
 
             if ($Lines.Count -eq 0) {
@@ -572,65 +594,85 @@ function Capture-NewDevice {
             Write-Host ""
 
             if ($LiveKeys) {
-                Write-Host "[Enter] Select device    [Q] Return to main menu" -ForegroundColor Cyan
+
+                if ($Lines.Count -eq 0) {
+                    Write-Host "[Q] Return to main menu" -ForegroundColor Cyan
+                }
+                else {
+                    # Re-show anything already typed after a redraw
+                    Write-Host $SelectPrompt -ForegroundColor Cyan -NoNewline
+                    Write-Host $Typed -NoNewline
+                }
             }
 
             $LastScreen = $Screen
         }
 
-        $Action = $null
-
         if ($LiveKeys) {
 
-            if ([Console]::KeyAvailable) {
-
-                $Key = [Console]::ReadKey($true).Key
-
-                if ($Key -eq 'Q' -or $Key -eq 'Escape') {
-                    $Action = "Quit"
-                }
-                elseif ($Key -eq 'Enter') {
-                    $Action = "Select"
-                }
-            }
-            else {
+            if (![Console]::KeyAvailable) {
                 Start-Sleep -Milliseconds 100
+                continue
             }
+
+            $KeyInfo = [Console]::ReadKey($true)
+
+            if ($KeyInfo.Key -eq 'Q' -or $KeyInfo.Key -eq 'Escape') {
+                # Any scan still running finishes in the background and is
+                # discarded by the next capture, so leaving is instant.
+                return
+            }
+
+            # Nothing to select until a device shows up
+            if ($NewDevices.Count -eq 0) {
+                continue
+            }
+
+            if ($KeyInfo.Key -eq 'Backspace') {
+                if ($Typed.Length -gt 0) {
+                    $Typed = $Typed.Substring(0, $Typed.Length - 1)
+                    Write-Host "`b `b" -NoNewline
+                }
+                continue
+            }
+
+            if ($KeyInfo.KeyChar -match '[0-9, ]') {
+                $Typed += $KeyInfo.KeyChar
+                Write-Host $KeyInfo.KeyChar -NoNewline
+                continue
+            }
+
+            if ($KeyInfo.Key -ne 'Enter' -or !$Typed.Trim()) {
+                continue
+            }
+
+            $Answer = $Typed
+            $Typed = ""
         }
         else {
 
-            $Answer = Read-Host "Press Enter to refresh, S to select a device, Q to return to main menu"
+            $Answer = Read-Host "Type device number(s), e.g. 1 or 1,3. Press Enter to refresh, Q = main menu"
+            $LastScreen = $null
 
             if ($Answer -match '^\s*q') {
-                $Action = "Quit"
-            }
-            elseif ($Answer -match '^\s*s') {
-                $Action = "Select"
+                return
             }
 
-            $LastScreen = $null
+            if (!$Answer.Trim() -or $NewDevices.Count -eq 0) {
+                continue
+            }
         }
 
-        # Any scan still running when we leave finishes in the background
-        # and is discarded by the next capture, so leaving is instant.
-        if ($Action -eq "Quit") {
-            return
-        }
+        $Indexes = @(Get-SelectionIndexes $Answer $NewDevices.Count)
 
-        if ($Action -eq "Select" -and $NewDevices.Count -gt 0) {
-
+        if ($Indexes.Count -gt 0) {
             Write-Host ""
-
-            $Indexes = @(Read-MultiSelection "Select device(s), e.g. 1 or 1,3" $NewDevices.Count)
-
-            if ($Indexes.Count -gt 0) {
-                break
-            }
-
-            # Invalid input: pause briefly, then go back to watching
-            Start-Sleep -Seconds 2
-            $LastScreen = $null
+            break
         }
+
+        # Invalid input: pause briefly, then go back to watching
+        Start-Sleep -Seconds 2
+        $LastScreen = $null
     }
 
     $Selected = @($Indexes | ForEach-Object { $NewDevices[$_] })

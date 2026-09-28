@@ -46,7 +46,9 @@ A `Drivers` folder is created next to the script the first time it runs. Every c
 
 ### 1. Capture New USB Device
 
-Watches for newly connected USB devices. There is no time limit: the screen updates live as devices appear, showing each device's driver status. When the device you want shows its driver, press **Enter** and pick one or more devices (for example `1` or `1,3`). Press **Q** at any time to return to the main menu.
+Watches for newly connected USB devices. There is no time limit: the screen updates live as devices appear, showing each device's driver status. When the device you want shows its driver, just type its number and press **Enter**. Pick several at once with commas (for example `1,3`). Press **Q** at any time to return to the main menu.
+
+Devices keep their numbers while you watch: a newly detected device is always added to the bottom of the list.
 
 ```text
 =========================================
@@ -58,7 +60,7 @@ New Devices Detected
 1. USB Serial Converter  [oem45.inf, third-party]
 2. USB Serial Port (COM3)  [oem46.inf, third-party]
 
-[Enter] Select device    [Q] Return to main menu
+Select device(s), e.g. 1 or 1,3 (Q = main menu): 2
 ```
 
 For each selected device it records:
@@ -284,9 +286,9 @@ Plug in the device (as many as you like)
       ↓
 New devices appear on screen with their driver status
       ↓
-Wait until the driver shows, then press Enter
+Wait until the driver shows
       ↓
-Choose one or more devices
+Type the device number(s) and press Enter
       ↓
 Export the driver packages
 ```
@@ -319,10 +321,10 @@ Built-in Windows drivers (such as `usb.inf` or `msports.inf`) can't be exported,
 
 ### Tips
 
-- Wait until the device shows a driver before pressing Enter. First-time installs, especially from Windows Update, can take a minute or more.
+- Wait until the device shows a driver before selecting it. First-time installs, especially from Windows Update, can take a minute or more.
 - USB flash drives and most keyboards and mice use built-in Windows drivers. They are good for checking that detection works, but only their device info is saved.
 - Many devices create more than one entry. A USB serial adapter, for example, shows both the USB device and its COM port, often with separate drivers. Select both (such as `1,2`) to keep the full set.
-- Running in the PowerShell ISE? Live key presses aren't supported there, so the capture screen asks you to press Enter to refresh, **S** to select, or **Q** to return instead. A regular PowerShell window is recommended.
+- Running in the PowerShell ISE? Live key presses aren't supported there, so the capture screen asks you to type the device number(s), press Enter to refresh, or type **Q** to return instead. A regular PowerShell window is recommended.
 - If Windows installs a generic driver, install the vendor driver first, then capture.
 - Capturing the same device again replaces its previous export.
 
