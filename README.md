@@ -37,7 +37,7 @@ A `Drivers` folder is created next to the script the first time it runs. Every c
 
 | # | Option | What it does |
 |---|--------|--------------|
-| 1 | Capture New USB Device | Waits for a USB device to be plugged in, then exports its driver |
+| 1 | Capture New USB Device | Watches for USB devices being plugged in, then exports the drivers you pick |
 | 2 | Capture Any New Device | Same as option 1, but for any Plug and Play device |
 | 3 | Install Exported Driver | Installs a driver package from the repository |
 | 4 | View Driver Repository | Lists every saved driver with its version and INF |
@@ -46,7 +46,22 @@ A `Drivers` folder is created next to the script the first time it runs. Every c
 
 ### 1. Capture New USB Device
 
-Waits for a newly connected USB device and records:
+Watches for newly connected USB devices. There is no time limit: the screen updates live as devices appear, showing each device's driver status. When the device you want shows its driver, press **Enter** and pick one or more devices (for example `1` or `1,3`). Press **Q** at any time to return to the main menu.
+
+```text
+=========================================
+ CAPTURE NEW USB DEVICE
+=========================================
+
+New Devices Detected
+--------------------
+1. USB Serial Converter  [oem45.inf, third-party]
+2. USB Serial Port (COM3)  [oem46.inf, third-party]
+
+[Enter] Select device    [Q] Return to main menu
+```
+
+For each selected device it records:
 
 - Device name, manufacturer, class, and status
 - Hardware IDs and compatible IDs
@@ -241,22 +256,22 @@ Copy it to a network share, OneDrive, a technician toolkit, or long-term storage
 
 ### Device Capture
 
-Options 1 and 2 only capture devices that appear **after** monitoring starts. Docks, keyboards, and other peripherals that are already connected are ignored.
+Options 1 and 2 only capture devices that appear **after** monitoring starts. Docks, keyboards, and other peripherals that are already connected are ignored. If the device you want is already plugged in, unplug it and plug it back in while the toolkit is watching.
 
 ```text
 Start monitoring
       ↓
 Take a snapshot of connected devices
       ↓
-Plug in the device
+Plug in the device (as many as you like)
       ↓
-Detect new devices (waits up to 2 minutes; press any key to cancel)
+New devices appear on screen with their driver status
       ↓
-Wait for Windows to finish installing the driver
+Wait until the driver shows, then press Enter
       ↓
-Choose a device
+Choose one or more devices
       ↓
-Export the driver package
+Export the driver packages
 ```
 
 ### Multiple Devices
@@ -269,7 +284,7 @@ Dell Dock Audio
 Dell Dock Ethernet Adapter
 ```
 
-The toolkit lists every new device and lets you pick the one to capture.
+The toolkit lists every new device and lets you pick the ones to capture.
 
 ### Driver Export
 
@@ -277,9 +292,20 @@ Drivers are exported with `pnputil /export-driver`, the Microsoft-supported way 
 
 Built-in Windows drivers (such as `usb.inf` or `msports.inf`) can't be exported, because they ship with Windows. When a device uses one, the summary says so and no files are exported.
 
+### Driver Status Labels
+
+| Label | Meaning |
+|-------|---------|
+| `oem45.inf, third-party` | A vendor driver. This is what the toolkit exports. |
+| `usbstor.inf, built-in Windows driver` | Ships with Windows. Nothing to export. |
+| `no driver yet` | Windows is still installing the driver. Keep waiting. |
+
 ### Tips
 
-- If a capture reports **No driver is installed for this device yet**, Windows was still installing it. Wait a minute, then use option 5.
+- Wait until the device shows a driver before pressing Enter. First-time installs, especially from Windows Update, can take a minute or more.
+- USB flash drives and most keyboards and mice use built-in Windows drivers. They are good for checking that detection works, but there is nothing to export.
+- Many devices create more than one entry. A USB serial adapter, for example, shows both the USB device and its COM port, often with separate drivers. Select both (such as `1,2`) to keep the full set.
+- Running in the PowerShell ISE? Live key presses aren't supported there, so the capture screen asks you to press Enter to refresh, **S** to select, or **Q** to return instead. A regular PowerShell window is recommended.
 - If Windows installs a generic driver, install the vendor driver first, then capture.
 - Capturing the same device again replaces its previous export.
 

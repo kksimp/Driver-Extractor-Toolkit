@@ -291,113 +291,239 @@ pause
     Write-Host ""
 }
 
+function Get-DriverLabel {
+
+    param([string]$InstanceId)
+
+    try {
+        $INF = (Get-PnpDeviceProperty `
+            -InstanceId $InstanceId `
+            -KeyName DEVPKEY_Device_DriverInfPath).Data
+    }
+    catch {
+        $INF = $null
+    }
+
+    if (!$INF) {
+        return "no driver yet"
+    }
+
+    if ($INF -match '^oem\d+\.inf$') {
+        return "$INF, third-party"
+    }
+
+    return "$INF, built-in Windows driver"
+}
+
+function Read-MultiSelection {
+
+    param(
+        [string]$Prompt,
+        [int]$Max
+    )
+
+    $Indexes = @()
+
+    foreach ($Part in ((Read-Host $Prompt) -split ',')) {
+
+        $Number = 0
+
+        if (![int]::TryParse($Part.Trim(), [ref]$Number) -or $Number -lt 1 -or $Number -gt $Max) {
+            Write-Host "Invalid selection: '$($Part.Trim())'" -ForegroundColor Yellow
+            return @()
+        }
+
+        if ($Indexes -notcontains ($Number - 1)) {
+            $Indexes += $Number - 1
+        }
+    }
+
+    return $Indexes
+}
+
 function Capture-NewDevice {
 
     param(
-        [bool]$USBOnly = $true,
-        [int]$TimeoutSeconds = 120
+        [bool]$USBOnly = $true
     )
 
-    Clear-Host
+    $Title = if ($USBOnly) { "CAPTURE NEW USB DEVICE" } else { "CAPTURE ANY NEW DEVICE" }
 
-    if ($USBOnly) {
-        Write-Host "Waiting for a new USB device..."
+    # Everything present now is ignored. A device that is unplugged while
+    # watching drops out of this baseline, so plugging it back in counts as new.
+    $Baseline = @{}
+
+    foreach ($Device in Get-PnpDevice -PresentOnly) {
+        $Baseline[$Device.InstanceId] = $true
     }
-    else {
-        Write-Host "Waiting for a new device..."
+
+    $UsbCache = @{}
+    $LastScreen = $null
+
+    # [Console]::KeyAvailable does not work in the PowerShell ISE, so fall
+    # back to Read-Host prompts there.
+    $LiveKeys = $true
+
+    try {
+        while ([Console]::KeyAvailable) {
+            [Console]::ReadKey($true) | Out-Null
+        }
+    }
+    catch {
+        $LiveKeys = $false
     }
 
-    Write-Host "Plug the device in now. Press any key to cancel (times out after $TimeoutSeconds seconds)."
+    while ($true) {
 
-    # -PresentOnly matters: without it, Get-PnpDevice also returns devices that
-    # were connected in the past, so re-plugging a known device would be missed.
-    $Before = Get-PnpDevice -PresentOnly | Select-Object -ExpandProperty InstanceId
+        $Present = @(Get-PnpDevice -PresentOnly)
+        $PresentIds = @{}
 
-    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $NewDevices = @()
+        foreach ($Device in $Present) {
+            $PresentIds[$Device.InstanceId] = $true
+        }
 
-    while ((Get-Date) -lt $Deadline) {
-
-        Start-Sleep -Seconds 2
-
-        try {
-            if ([Console]::KeyAvailable) {
-                [Console]::ReadKey($true) | Out-Null
-                Write-Host "Cancelled."
-                Pause-Toolkit
-                return
+        foreach ($Id in @($Baseline.Keys)) {
+            if (!$PresentIds.ContainsKey($Id)) {
+                $Baseline.Remove($Id)
             }
         }
-        catch {}
 
-        $NewDevices = @(Get-PnpDevice -PresentOnly | Where-Object {
-            $_.InstanceId -notin $Before
+        $NewDevices = @($Present | Where-Object {
+            !$Baseline.ContainsKey($_.InstanceId)
         })
 
-        if ($NewDevices.Count -gt 0) {
-            break
+        if ($USBOnly) {
+            $NewDevices = @($NewDevices | Where-Object {
+                if (!$UsbCache.ContainsKey($_.InstanceId)) {
+                    $UsbCache[$_.InstanceId] = Test-IsUsbDevice $_.InstanceId
+                }
+                $UsbCache[$_.InstanceId]
+            })
         }
-    }
 
-    if ($NewDevices.Count -gt 0) {
+        $Lines = @()
 
-        # Give Windows time to finish enumerating child devices and
-        # installing drivers before reading driver details.
-        Write-Host "Device detected. Waiting for driver installation to settle..."
-        Start-Sleep -Seconds 10
+        for ($i = 0; $i -lt $NewDevices.Count; $i++) {
 
-        $NewDevices = @(Get-PnpDevice -PresentOnly | Where-Object {
-            $_.InstanceId -notin $Before
-        })
-    }
+            $Device = $NewDevices[$i]
 
-    if ($USBOnly) {
-        $NewDevices = @($NewDevices | Where-Object {
-            Test-IsUsbDevice $_.InstanceId
-        })
-    }
+            $DisplayName = if ($Device.FriendlyName) {
+                $Device.FriendlyName
+            }
+            else {
+                $Device.InstanceId
+            }
 
-    if ($NewDevices.Count -eq 0) {
+            $Lines += "$($i+1). $DisplayName  [$(Get-DriverLabel $Device.InstanceId)]"
+        }
 
-        Write-Host ""
-        Write-Host "No new devices detected."
+        # Only redraw when something changed, so the screen doesn't flicker
+        $Screen = $Lines -join "`n"
 
-        Pause-Toolkit
-        return
-    }
+        if ($Screen -ne $LastScreen) {
 
-    Write-Host ""
-    Write-Host "New Devices Detected"
-    Write-Host "--------------------"
+            Clear-Host
 
-    for ($i = 0; $i -lt $NewDevices.Count; $i++) {
+            Write-Host "========================================="
+            Write-Host " $Title"
+            Write-Host "========================================="
+            Write-Host ""
+            Write-Host "Plug in the device now. If it is already plugged in, unplug it and plug it back in."
+            Write-Host "Wait until the device you want shows its driver, then press Enter to select it."
+            Write-Host ""
 
-        $Device = $NewDevices[$i]
+            if ($Lines.Count -eq 0) {
+                Write-Host "Watching for new devices..." -ForegroundColor Cyan
+            }
+            else {
+                Write-Host "New Devices Detected"
+                Write-Host "--------------------"
 
-        $DisplayName = if ($Device.FriendlyName) {
-            $Device.FriendlyName
+                foreach ($Line in $Lines) {
+                    Write-Host $Line
+                }
+            }
+
+            Write-Host ""
+
+            if ($LiveKeys) {
+                Write-Host "[Enter] Select device    [Q] Return to main menu" -ForegroundColor Cyan
+            }
+
+            $LastScreen = $Screen
+        }
+
+        $Action = $null
+
+        if ($LiveKeys) {
+
+            # Listen for keys for ~2 seconds, then refresh the device list
+            $Until = (Get-Date).AddSeconds(2)
+
+            while (!$Action -and (Get-Date) -lt $Until) {
+
+                if ([Console]::KeyAvailable) {
+
+                    $Key = [Console]::ReadKey($true).Key
+
+                    if ($Key -eq 'Q' -or $Key -eq 'Escape') {
+                        $Action = "Quit"
+                    }
+                    elseif ($Key -eq 'Enter') {
+                        $Action = "Select"
+                    }
+                }
+                else {
+                    Start-Sleep -Milliseconds 100
+                }
+            }
         }
         else {
-            $Device.InstanceId
+
+            $Answer = Read-Host "Press Enter to refresh, S to select a device, Q to return to main menu"
+
+            if ($Answer -match '^\s*q') {
+                $Action = "Quit"
+            }
+            elseif ($Answer -match '^\s*s') {
+                $Action = "Select"
+            }
+
+            $LastScreen = $null
         }
 
-        Write-Host "$($i+1). $DisplayName"
+        if ($Action -eq "Quit") {
+            return
+        }
+
+        if ($Action -eq "Select") {
+
+            if ($NewDevices.Count -eq 0) {
+                continue
+            }
+
+            Write-Host ""
+
+            $Indexes = @(Read-MultiSelection "Select device(s), e.g. 1 or 1,3" $NewDevices.Count)
+
+            if ($Indexes.Count -gt 0) {
+                break
+            }
+
+            # Invalid input: pause briefly, then go back to watching
+            Start-Sleep -Seconds 2
+            $LastScreen = $null
+        }
     }
 
-    Write-Host ""
+    foreach ($Index in $Indexes) {
 
-    $Index = Read-Selection "Select device" $NewDevices.Count
+        $SelectedDevice = $NewDevices[$Index]
 
-    if ($null -eq $Index) {
-        Pause-Toolkit
-        return
+        $DriverInfo = Get-SignedDriverInfo $SelectedDevice.InstanceId
+
+        Export-DriverPackage $SelectedDevice $DriverInfo
     }
-
-    $SelectedDevice = $NewDevices[$Index]
-
-    $DriverInfo = Get-SignedDriverInfo $SelectedDevice.InstanceId
-
-    Export-DriverPackage $SelectedDevice $DriverInfo
 
     Pause-Toolkit
 }
