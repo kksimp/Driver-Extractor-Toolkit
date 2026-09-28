@@ -2,75 +2,83 @@
 
 A portable PowerShell utility for capturing, backing up, organizing, and reinstalling Windows drivers.
 
-Designed for IT technicians who regularly deal with hard-to-find drivers for printers, scanners, USB serial adapters, dealership diagnostic equipment, label printers, specialty USB devices, legacy hardware, and other devices that can be difficult or impossible to locate later.
+Built for IT technicians who deal with hard-to-find drivers: printers, scanners, USB serial adapters, dealership diagnostic equipment, label printers, specialty USB devices, legacy hardware, and anything else that can be difficult or impossible to find again later.
 
----
+## Contents
 
-## Features
+- [Quick Start](#quick-start)
+- [Menu Options](#menu-options)
+- [Repository Structure](#repository-structure)
+- [Output Files](#output-files)
+- [How It Works](#how-it-works)
+- [Requirements](#requirements)
+- [Use Cases](#use-cases)
+- [Roadmap](#roadmap)
+- [License](#license)
+
+## Quick Start
+
+1. Download `Driver-Extractor-Toolkit.ps1` into its own folder (a USB stick or network share works well).
+2. If the file came from the internet, unblock it:
+
+   ```powershell
+   Unblock-File .\Driver-Extractor-Toolkit.ps1
+   ```
+
+3. Open PowerShell **as Administrator** and run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Driver-Extractor-Toolkit.ps1
+   ```
+
+A `Drivers` folder is created next to the script the first time it runs. Every captured driver is saved there.
+
+## Menu Options
+
+| # | Option | What it does |
+|---|--------|--------------|
+| 1 | Capture New USB Device | Waits for a USB device to be plugged in, then exports its driver |
+| 2 | Capture Any New Device | Same as option 1, but for any Plug and Play device |
+| 3 | Install Exported Driver | Installs a driver package from the repository |
+| 4 | View Driver Repository | Lists every saved driver with its version and INF |
+| 5 | Extract Installed Driver | Exports the driver of a device that is already installed |
+| 6 | Exit | Closes the toolkit |
 
 ### 1. Capture New USB Device
 
-Monitors for newly connected USB devices and captures:
+Waits for a newly connected USB device and records:
 
-- Device information
-- Hardware IDs
-- Compatible IDs
-- Driver version
-- Driver provider
-- Driver date
-- INF file name
-- Driver service information
+- Device name, manufacturer, class, and status
+- Hardware IDs and compatible IDs
+- Driver provider, version, and date
+- INF name and driver service
 
-The tool then:
+It then exports the driver package, generates an install script, and zips everything into a portable backup.
 
-- Copies the associated driver package from the Windows Driver Store
-- Creates a portable installation package
-- Archives everything into a ZIP file
-
----
+Child devices created by a USB device (for example the COM port of a USB serial adapter, or the HID interface of a scanner) are also listed, so you can capture the exact device whose driver you need.
 
 ### 2. Capture Any New Device
 
-Works like USB capture but monitors all Plug-and-Play devices.
+Works like option 1 but watches all Plug and Play devices, not only USB. Use it for:
 
-Useful for:
-
-- PCI devices
+- PCI and PCIe cards
 - Bluetooth adapters
 - Docking stations
-- Network adapters
-- Graphics adapters
+- Network and graphics adapters
 - Unknown devices
-- USB devices
-
-This option is helpful when the target hardware is not technically a USB device.
-
----
 
 ### 3. Install Exported Driver
 
-Installs previously exported drivers directly from the repository.
+Installs a saved driver on the current machine.
 
-Features:
-
-- Lists available driver packages
-- Uses Microsoft PnPUtil for installation
-- Supports multi-INF packages
-- Works from exported DriverFiles folders
-
----
+- Lists every package in the repository
+- Installs with Microsoft PnPUtil
+- Supports packages that contain multiple INF files
+- Reports success, failure, or a required reboot
 
 ### 4. View Driver Repository
 
-Provides a quick inventory of the driver repository.
-
-Displays:
-
-- Driver package name
-- Driver version
-- INF file name
-
-Example:
+Shows a quick inventory of saved drivers:
 
 ```text
 1. USB Serial Converter
@@ -82,78 +90,60 @@ Example:
    INF: oem112.inf
 ```
 
----
-
 ### 5. Extract Installed Driver
 
-Extracts drivers from devices already installed on the machine.
+Exports the driver of a device that is already installed. It lists third-party drivers only, since built-in Windows drivers already ship with every copy of Windows.
 
-Perfect for situations where:
+Useful when:
 
 - The hardware is no longer available
 - The device is built into the system
 - You want to preserve drivers before rebuilding a computer
-- Vendor downloads are unavailable
+- Vendor downloads are no longer available
 
----
-
-### 6. Exit
-
-Closes the application.
-
----
-
-# Repository Structure
+## Repository Structure
 
 ```text
-Driver Extractor
-│
-├── DriverToolkit.ps1
-│
+Driver Extractor Toolkit
+├── Driver-Extractor-Toolkit.ps1
 └── Drivers
-    │
     ├── Zebra Printer
     │   ├── DriverSummary.txt
     │   ├── InstallDriver.cmd
     │   ├── DriverBackup.zip
-    │   └── DriverFiles
-    │
+    │   └── DriverFiles\
     └── USB Serial Converter
         ├── DriverSummary.txt
         ├── InstallDriver.cmd
         ├── DriverBackup.zip
-        └── DriverFiles
+        └── DriverFiles\
 ```
 
----
+## Output Files
 
-# Output Files
+Each captured driver gets its own folder containing the files below.
 
-Each exported driver package includes:
+### DriverSummary.txt
 
-## DriverSummary.txt
+A plain-text record of the device and its driver:
 
-Contains:
+| Field | Field |
+|-------|-------|
+| Capture Date | Driver Provider |
+| Computer Name | Driver Version |
+| Device Name | Driver Date |
+| Manufacturer | INF Name |
+| Status | Service Name |
+| Class | Hardware IDs |
+| Instance ID | Compatible IDs |
 
-- Device Name
-- Manufacturer
-- Device Class
-- Status
-- Instance ID
-- Driver Provider
-- Driver Version
-- Driver Date
-- INF Name
-- Service Name
-- Hardware IDs
-- Compatible IDs
-- Capture Date
+It ends with an export result saying whether the driver files were exported, and why not if they weren't.
 
 Example:
 
 ```text
 ===========================================
-DRIVER CAPTURE SUMMARY
+ DRIVER CAPTURE SUMMARY
 ===========================================
 
 Capture Date:
@@ -169,7 +159,7 @@ Status:
 OK
 
 Class:
-Ports
+USB
 
 Instance ID:
 USB\VID_0403&PID_6001\A50285BI
@@ -185,171 +175,155 @@ Driver Version:
 2.12.36.4
 
 Driver Date:
-2024-03-15
+3/15/2024
 
 INF:
 oem45.inf
 
 Service:
-FTSER2K
+FTDIBUS
 
 -------------------------------------------
 HARDWARE IDS
 -------------------------------------------
-
-USB\VID_0403&PID_6001
 USB\VID_0403&PID_6001&REV_0600
+USB\VID_0403&PID_6001
+
+-------------------------------------------
+EXPORT RESULT
+-------------------------------------------
+
+Driver Files Exported: YES
 ```
 
----
+### DriverFiles
 
-## DriverFiles
-
-Contains the exported driver package from the Windows Driver Store.
-
-Typically includes:
+The complete driver package, exported from the Windows Driver Store with `pnputil /export-driver`. It typically contains:
 
 ```text
-*.INF
-*.SYS
-*.CAT
-DLL*Files
-Supporting Files
-``*
+*.inf    Setup information file
+*.sys    Driver binaries
+*.cat    Signed catalog file
+*.dll    Supporting libraries
+```
 
----
+### InstallDriver.cmd
 
-## InstallDriver.cmd
+A generated install script. Right-click it and choose **Run as administrator** to install the driver on another machine without the toolkit.
 
-Autom*tically generated*installation script.
-
-```*md
+```bat
 @echo off
-echo Installing*Driver...
-pnput*l /add-driver ".\DriverFiles**.inf" /subdirs /install
-*ause
+net session >nul 2>&1
+if errorlevel 1 (
+    echo This script must be run as Administrator.
+    echo Right-click InstallDriver.cmd and choose "Run as administrator".
+    pause
+    exit /b 1
+)
+echo Installing Driver...
+pnputil /add-driver "%~dp0DriverFiles\*.inf" /subdirs /install
+pause
 ```
 
-*--
+### DriverBackup.zip
 
-## DriverBackup.zip
-
-Portable *rchive containing:
+A portable archive containing:
 
 ```text
-Driver*ummary.txt
+DriverSummary.txt
 InstallDriver.cmd
-Drive*Files\
+DriverFiles\
 ```
 
-*his ZIP*file can be copied to network*shares, OneDrive, technician repos*tories, or archives.
+Copy it to a network share, OneDrive, a technician toolkit, or long-term storage. Extract it anywhere and run `InstallDriver.cmd` to install.
 
----
+## How It Works
 
-# Techn*cal Notes
+### Device Capture
 
-### USB*Monitoring*
-The USB capture option only captu*es devices detected after monitori*g begins.
+Options 1 and 2 only capture devices that appear **after** monitoring starts. Docks, keyboards, and other peripherals that are already connected are ignored.
 
-This prevents*existing dock devices and already*connected peripherals from being c*ptured accidentally.
-
-Workflow:
-
-`*`text
-Start Monitoring
-      ↓**ake Snapshot
+```text
+Start monitoring
       ↓
-Plug In Devic*
-      ↓*Detect New Device
+Take a snapshot of connected devices
       ↓
-Choose*Device
-      ↓*Export Driver Package
+Plug in the device
+      ↓
+Detect new devices (waits up to 2 minutes; press any key to cancel)
+      ↓
+Wait for Windows to finish installing the driver
+      ↓
+Choose a device
+      ↓
+Export the driver package
 ```
 
-*--
+### Multiple Devices
 
-### Multiple Device Detection
-*Some hardware may install multiple*devices simultaneously.
+Some hardware installs several devices at once. For example, a dock might add:
 
-Example:
-*```text
-*ell Dock USB Hub
+```text
+Dell Dock USB Hub
 Dell Dock Audio
-D*ll Dock Ethernet Adapter
+Dell Dock Ethernet Adapter
 ```
 
-*he toolkit presents all newly dete*ted devices and*allows you to select which device *hould be captured.
+The toolkit lists every new device and lets you pick the one to capture.
 
----
+### Driver Export
 
-# Require*ents
+Drivers are exported with `pnputil /export-driver`, the Microsoft-supported way to copy a package out of the Driver Store. PnPUtil maps the published name Windows gives the driver (such as `oem45.inf`) to the correct Driver Store folder and exports the full package.
 
-- Windows*10
-- Windows 11
-- Power*hell 5.1+
-- Administrator privileg*s
+Built-in Windows drivers (such as `usb.inf` or `msports.inf`) can't be exported, because they ship with Windows. When a device uses one, the summary says so and no files are exported.
 
----
+### Tips
 
-# Recommended*Use Cases
+- If a capture reports **No driver is installed for this device yet**, Windows was still installing it. Wait a minute, then use option 5.
+- If Windows installs a generic driver, install the vendor driver first, then capture.
+- Capturing the same device again replaces its previous export.
 
-### Enterprise*IT
+## Requirements
 
-Archive drivers before reimagi*g systems.
+- Windows 10 (version 1607 or later) or Windows 11
+- Windows PowerShell 5.1 or PowerShell 7+
+- Administrator privileges
 
-### Help Desk
+## Use Cases
 
-Quickly*preserve*hard-to-find drivers from user com*uters.
+| Scenario | Why it helps |
+|----------|--------------|
+| Enterprise IT | Archive drivers before reimaging systems |
+| Help desk | Quickly preserve hard-to-find drivers from user computers |
+| Printers | Capture manufacturer drivers for future deployment |
+| Scanners | Archive barcode and specialty scanner drivers |
+| USB serial adapters | Preserve FTDI, Prolific, and manufacturer-specific drivers |
+| Automotive diagnostics | Store dealership and OEM diagnostic interface drivers |
+| Industrial equipment | Preserve drivers for devices with limited manufacturer support |
+| Legacy hardware | Archive drivers before vendor downloads disappear |
 
-### Printers
+## Why This Exists
 
-Capture*manufacturer*drivers*for future deployment.
+Finding drivers years after a device was deployed can be difficult or impossible.
 
-### Sc*nners*
-Archive barcode*scanner and specialty scanner driv*rs.
+Driver Extractor Toolkit builds a portable, organized driver repository directly from a working Windows installation. Rare and hard-to-find drivers become easy to archive, transfer, and reinstall on future systems.
 
-### USB Serial Adapters
+## Roadmap
 
-Pres*rve FTDI, Prolific, and manufactur*r-specific drivers.
+Possible future improvements:
 
-### Automotiv* Diagnostic Equipment
+- Search drivers by VID/PID
+- Tag driver packages
+- Export and import the whole repository
+- CSV inventory reports
+- Automatic driver verification
+- Device Manager screenshot capture
+- Deduplicate driver packages
+- Silent installation mode
+- Driver package integrity validation
 
-Store deale*ship and OEM diagnostic interface *rivers.
+## License
 
-### Industrial Equipment
-*Preserve drivers for devices with *imited manufacturer support.
+Use, modify, and distribute as needed.
 
-### *egacy Hardware
-
-Archive drivers be*ore vendor downloads disappear.
-
--*-
-
-# Why This Exists
-
-Finding driv*rs years after a device was deploy*d can be difficult or impossible.
-*Driver Extractor Toolkit creates a*portable, organized driver reposit*ry directly from a working Windows*installation, making rare and hard*to-find drivers easy to archive, t*ansfer, and reinstall on future sy*tems.
-
----
-
-#*Future Enhancements
-
-Potential fut*re improvements include:
-
-- Driver*search*by VID/PID
-- Driver*package tagging
-- Driver*repository export/import
-- CSV*inventory*reports
-- Automatic*driver verification
-- Device*Manager*screenshot capture*- Driver package deduplication
-- S*lent*installation*mode
-- Driver package integrity va*idation
-
----
-
-# License
-
-Use, modi*y, and distribute as needed.
-
-*o*warranty*is*provided.*Test*all*driver*installations in accordance*with your organization's change ma*agement and deployment policies.
-`*``*
+No warranty is provided. Test all driver installations in line with your organization's change management and deployment policies.

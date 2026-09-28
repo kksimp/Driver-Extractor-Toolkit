@@ -1,34 +1,112 @@
-# DriverToolkit.ps1
-# Run as Administrator
+# Driver-Extractor-Toolkit.ps1
+# Run as Administrator from Windows PowerShell 5.1 or PowerShell 7+
 
-$ErrorActionPreference = "SilentlyContinue"
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
 
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$DriversRoot = Join-Path $ScriptRoot "Drivers"
+$ErrorActionPreference = "Stop"
 
-if (!(Test-Path $DriversRoot)) {
+$DriversRoot = Join-Path $PSScriptRoot "Drivers"
+
+if (!(Test-Path -LiteralPath $DriversRoot)) {
     New-Item -ItemType Directory -Path $DriversRoot -Force | Out-Null
 }
 
 function Pause-Toolkit {
     Write-Host ""
-    Read-Host "Press Enter to continue"
+    Read-Host "Press Enter to continue" | Out-Null
 }
 
 function Get-SafeName {
     param([string]$Name)
-    return ($Name -replace '[\\/:*?"<>|]', '_')
+
+    # Strip characters that are invalid in folder names, plus [ ] which
+    # PowerShell treats as wildcards. Windows also ignores trailing dots/spaces.
+    return ($Name -replace '[\\/:*?"<>|\[\]]', '_').Trim().TrimEnd('.')
 }
 
-function Find-DriverStoreFolder {
+function Read-Selection {
 
-    param([string]$INFName)
+    param(
+        [string]$Prompt,
+        [int]$Max
+    )
 
-    Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository" -Directory |
-        Where-Object {
-            Test-Path (Join-Path $_.FullName $INFName)
-        } |
+    $Selection = Read-Host $Prompt
+    $Number = 0
+
+    if (![int]::TryParse($Selection, [ref]$Number) -or $Number -lt 1 -or $Number -gt $Max) {
+        Write-Host "Invalid selection." -ForegroundColor Yellow
+        return $null
+    }
+
+    return $Number - 1
+}
+
+function Get-SignedDriverInfo {
+
+    param([string]$InstanceId)
+
+    # WQL string literals need backslashes and single quotes escaped
+    $Escaped = $InstanceId.Replace('\', '\\').Replace("'", "\'")
+
+    Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceID = '$Escaped'" |
         Select-Object -First 1
+}
+
+function Test-IsUsbDevice {
+
+    param([string]$InstanceId)
+
+    # Walk up the device tree so child devices of a USB device (COM ports,
+    # HID interfaces, storage volumes, etc.) are also treated as USB.
+    $Current = $InstanceId
+
+    for ($Depth = 0; $Depth -lt 6 -and $Current; $Depth++) {
+
+        if ($Current -match '^USB') {
+            return $true
+        }
+
+        try {
+            $Current = (Get-PnpDeviceProperty `
+                -InstanceId $Current `
+                -KeyName DEVPKEY_Device_Parent).Data
+        }
+        catch {
+            return $false
+        }
+    }
+
+    return $false
+}
+
+function Export-DriverFiles {
+
+    param(
+        [string]$INFName,
+        [string]$Destination
+    )
+
+    # Third-party packages are published as oemNN.inf. Inbox drivers
+    # (usb.inf, msports.inf, ...) ship with Windows and cannot be exported.
+    if ($INFName -notmatch '^oem\d+\.inf$') {
+        return "Inbox Windows driver ($INFName) - included with Windows, nothing to export"
+    }
+
+    Write-Host "Exporting driver package $INFName..."
+
+    # Windows PowerShell 5.1 turns native stderr into a terminating error
+    # under "Stop", so let pnputil report through its exit code instead.
+    $ErrorActionPreference = "Continue"
+
+    $Output = & pnputil.exe /export-driver $INFName $Destination 2>&1
+
+    if ($LASTEXITCODE -ne 0) {
+        return "pnputil export failed (exit code $LASTEXITCODE): $($Output -join ' ')"
+    }
+
+    return $null
 }
 
 function Export-DriverPackage {
@@ -53,6 +131,12 @@ function Export-DriverPackage {
     $DeviceFolder = Join-Path $DriversRoot $SafeName
     $DriverFilesFolder = Join-Path $DeviceFolder "DriverFiles"
 
+    # Start from a clean DriverFiles folder so a re-capture never mixes
+    # files from an older driver version with the new one.
+    if (Test-Path -LiteralPath $DriverFilesFolder) {
+        Remove-Item -LiteralPath $DriverFilesFolder -Recurse -Force
+    }
+
     New-Item -ItemType Directory -Path $DeviceFolder -Force | Out-Null
     New-Item -ItemType Directory -Path $DriverFilesFolder -Force | Out-Null
 
@@ -66,6 +150,9 @@ function Export-DriverPackage {
     $Summary += ""
     $Summary += "Capture Date:"
     $Summary += "$(Get-Date)"
+    $Summary += ""
+    $Summary += "Computer Name:"
+    $Summary += "$env:COMPUTERNAME"
     $Summary += ""
     $Summary += "Device Name:"
     $Summary += "$DeviceName"
@@ -107,15 +194,18 @@ function Export-DriverPackage {
             -InstanceId $Device.InstanceId `
             -KeyName DEVPKEY_Device_HardwareIds
 
-        $Summary += "-------------------------------------------"
-        $Summary += "HARDWARE IDS"
-        $Summary += "-------------------------------------------"
+        if ($HardwareIDs.Data) {
 
-        foreach ($ID in $HardwareIDs.Data) {
-            $Summary += $ID
+            $Summary += "-------------------------------------------"
+            $Summary += "HARDWARE IDS"
+            $Summary += "-------------------------------------------"
+
+            foreach ($ID in $HardwareIDs.Data) {
+                $Summary += $ID
+            }
+
+            $Summary += ""
         }
-
-        $Summary += ""
     }
     catch {}
 
@@ -124,63 +214,73 @@ function Export-DriverPackage {
             -InstanceId $Device.InstanceId `
             -KeyName DEVPKEY_Device_CompatibleIds
 
-        $Summary += "-------------------------------------------"
-        $Summary += "COMPATIBLE IDS"
-        $Summary += "-------------------------------------------"
+        if ($CompatibleIDs.Data) {
 
-        foreach ($ID in $CompatibleIDs.Data) {
-            $Summary += $ID
+            $Summary += "-------------------------------------------"
+            $Summary += "COMPATIBLE IDS"
+            $Summary += "-------------------------------------------"
+
+            foreach ($ID in $CompatibleIDs.Data) {
+                $Summary += $ID
+            }
+
+            $Summary += ""
         }
-
-        $Summary += ""
     }
     catch {}
 
-    $Summary | Out-File $SummaryFile -Encoding UTF8
+    $Summary += "-------------------------------------------"
+    $Summary += "EXPORT RESULT"
+    $Summary += "-------------------------------------------"
+    $Summary += ""
 
-    if ($DriverInfo.InfName) {
-
-        $DriverStoreFolder = Find-DriverStoreFolder $DriverInfo.InfName
-
-        if ($DriverStoreFolder) {
-
-            Write-Host "Copying Driver Files..."
-
-            Copy-Item `
-                $DriverStoreFolder.FullName `
-                $DriverFilesFolder `
-                -Recurse `
-                -Force
-
-            Add-Content $SummaryFile ""
-            Add-Content $SummaryFile "Driver Files Exported: YES"
-
-        }
-        else {
-
-            Add-Content $SummaryFile ""
-            Add-Content $SummaryFile "Driver Files Exported: NO"
-            Add-Content $SummaryFile "DriverStore Folder Not Found"
-        }
+    $ExportError = if ($DriverInfo.InfName) {
+        Export-DriverFiles $DriverInfo.InfName $DriverFilesFolder
     }
+    else {
+        "No driver is installed for this device yet"
+    }
+
+    if ($ExportError) {
+        Write-Host $ExportError -ForegroundColor Yellow
+        $Summary += "Driver Files Exported: NO"
+        $Summary += $ExportError
+    }
+    else {
+        $Summary += "Driver Files Exported: YES"
+    }
+
+    $Summary | Out-File -LiteralPath $SummaryFile -Encoding UTF8
 
     $InstallCMD = Join-Path $DeviceFolder "InstallDriver.cmd"
 
+    # %~dp0 is the folder the .cmd lives in, so this works when launched via
+    # "Run as administrator" (which starts in C:\Windows\System32).
 @'
 @echo off
+net session >nul 2>&1
+if errorlevel 1 (
+    echo This script must be run as Administrator.
+    echo Right-click InstallDriver.cmd and choose "Run as administrator".
+    pause
+    exit /b 1
+)
 echo Installing Driver...
-pnputil /add-driver ".\DriverFiles\*.inf" /subdirs /install
+pnputil /add-driver "%~dp0DriverFiles\*.inf" /subdirs /install
 pause
-'@ | Out-File $InstallCMD -Encoding ASCII
+'@ | Out-File -LiteralPath $InstallCMD -Encoding ASCII
 
     $ZipFile = Join-Path $DeviceFolder "DriverBackup.zip"
 
-    if (Test-Path $ZipFile) {
-        Remove-Item $ZipFile -Force
+    if (Test-Path -LiteralPath $ZipFile) {
+        Remove-Item -LiteralPath $ZipFile -Force
     }
 
+    $ZipContents = Get-ChildItem -LiteralPath $DeviceFolder |
+        Select-Object -ExpandProperty FullName
+
     Compress-Archive `
-        -Path "$DeviceFolder\*" `
+        -LiteralPath $ZipContents `
         -DestinationPath $ZipFile `
         -Force
 
@@ -194,7 +294,8 @@ pause
 function Capture-NewDevice {
 
     param(
-        [bool]$USBOnly = $true
+        [bool]$USBOnly = $true,
+        [int]$TimeoutSeconds = 120
     )
 
     Clear-Host
@@ -206,31 +307,57 @@ function Capture-NewDevice {
         Write-Host "Waiting for a new device..."
     }
 
-    $Before = Get-PnpDevice | Select-Object -ExpandProperty InstanceId
+    Write-Host "Plug the device in now. Press any key to cancel (times out after $TimeoutSeconds seconds)."
 
-    Register-WmiEvent `
-        -Class Win32_DeviceChangeEvent `
-        -SourceIdentifier DeviceCapture | Out-Null
+    # -PresentOnly matters: without it, Get-PnpDevice also returns devices that
+    # were connected in the past, so re-plugging a known device would be missed.
+    $Before = Get-PnpDevice -PresentOnly | Select-Object -ExpandProperty InstanceId
 
-    Wait-Event -SourceIdentifier DeviceCapture | Out-Null
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $NewDevices = @()
 
-    Start-Sleep 5
+    while ((Get-Date) -lt $Deadline) {
 
-    $After = Get-PnpDevice
+        Start-Sleep -Seconds 2
 
-    $NewDevices = $After | Where-Object {
-        $_.InstanceId -notin $Before
-    }
+        try {
+            if ([Console]::KeyAvailable) {
+                [Console]::ReadKey($true) | Out-Null
+                Write-Host "Cancelled."
+                Pause-Toolkit
+                return
+            }
+        }
+        catch {}
 
-    Unregister-Event DeviceCapture -ErrorAction SilentlyContinue
+        $NewDevices = @(Get-PnpDevice -PresentOnly | Where-Object {
+            $_.InstanceId -notin $Before
+        })
 
-    if ($USBOnly) {
-        $NewDevices = $NewDevices | Where-Object {
-            $_.InstanceId -match '^USB'
+        if ($NewDevices.Count -gt 0) {
+            break
         }
     }
 
-    if (!$NewDevices) {
+    if ($NewDevices.Count -gt 0) {
+
+        # Give Windows time to finish enumerating child devices and
+        # installing drivers before reading driver details.
+        Write-Host "Device detected. Waiting for driver installation to settle..."
+        Start-Sleep -Seconds 10
+
+        $NewDevices = @(Get-PnpDevice -PresentOnly | Where-Object {
+            $_.InstanceId -notin $Before
+        })
+    }
+
+    if ($USBOnly) {
+        $NewDevices = @($NewDevices | Where-Object {
+            Test-IsUsbDevice $_.InstanceId
+        })
+    }
+
+    if ($NewDevices.Count -eq 0) {
 
         Write-Host ""
         Write-Host "No new devices detected."
@@ -243,9 +370,9 @@ function Capture-NewDevice {
     Write-Host "New Devices Detected"
     Write-Host "--------------------"
 
-    $Counter = 1
+    for ($i = 0; $i -lt $NewDevices.Count; $i++) {
 
-    foreach ($Device in $NewDevices) {
+        $Device = $NewDevices[$i]
 
         $DisplayName = if ($Device.FriendlyName) {
             $Device.FriendlyName
@@ -254,26 +381,21 @@ function Capture-NewDevice {
             $Device.InstanceId
         }
 
-        Write-Host "$Counter. $DisplayName"
-
-        $Counter++
+        Write-Host "$($i+1). $DisplayName"
     }
 
     Write-Host ""
 
-    $Selection = Read-Host "Select device"
+    $Index = Read-Selection "Select device" $NewDevices.Count
 
-    $SelectedDevice = $NewDevices[[int]$Selection - 1]
-
-    if (!$SelectedDevice) {
+    if ($null -eq $Index) {
+        Pause-Toolkit
         return
     }
 
-    $DriverInfo = Get-CimInstance Win32_PnPSignedDriver |
-    Where-Object {
-        $_.DeviceID -eq $SelectedDevice.InstanceId
-    } |
-    Select-Object -First 1
+    $SelectedDevice = $NewDevices[$Index]
+
+    $DriverInfo = Get-SignedDriverInfo $SelectedDevice.InstanceId
 
     Export-DriverPackage $SelectedDevice $DriverInfo
 
@@ -284,9 +406,9 @@ function Install-Driver {
 
     Clear-Host
 
-    $Drivers = Get-ChildItem $DriversRoot -Directory
+    $Drivers = @(Get-ChildItem -LiteralPath $DriversRoot -Directory)
 
-    if (!$Drivers) {
+    if ($Drivers.Count -eq 0) {
 
         Write-Host "No exported drivers found."
 
@@ -304,11 +426,25 @@ function Install-Driver {
 
     Write-Host ""
 
-    $Selection = Read-Host "Select package"
+    $Index = Read-Selection "Select package" $Drivers.Count
 
-    $Selected = $Drivers[[int]$Selection - 1]
+    if ($null -eq $Index) {
+        Pause-Toolkit
+        return
+    }
 
-    if (!$Selected) {
+    $Selected = $Drivers[$Index]
+    $DriverFilesFolder = Join-Path $Selected.FullName "DriverFiles"
+
+    $INFFiles = @(Get-ChildItem -LiteralPath $DriverFilesFolder -Filter *.inf -Recurse -ErrorAction SilentlyContinue)
+
+    if ($INFFiles.Count -eq 0) {
+
+        Write-Host ""
+        Write-Host "No .inf files found in $DriverFilesFolder" -ForegroundColor Yellow
+        Write-Host "This package has no exportable driver files."
+
+        Pause-Toolkit
         return
     }
 
@@ -316,7 +452,15 @@ function Install-Driver {
     Write-Host "Installing Driver..."
     Write-Host ""
 
-    pnputil /add-driver "$($Selected.FullName)\DriverFiles\*.inf" /subdirs /install
+    & pnputil.exe /add-driver "$DriverFilesFolder\*.inf" /subdirs /install
+
+    Write-Host ""
+
+    switch ($LASTEXITCODE) {
+        0       { Write-Host "Driver installed successfully." -ForegroundColor Green }
+        3010    { Write-Host "Driver installed. A reboot is required to finish." -ForegroundColor Yellow }
+        default { Write-Host "pnputil finished with exit code $LASTEXITCODE. Review the output above." -ForegroundColor Yellow }
+    }
 
     Pause-Toolkit
 }
@@ -325,9 +469,9 @@ function View-Repository {
 
     Clear-Host
 
-    $Folders = Get-ChildItem $DriversRoot -Directory
+    $Folders = @(Get-ChildItem -LiteralPath $DriversRoot -Directory)
 
-    if (!$Folders) {
+    if ($Folders.Count -eq 0) {
 
         Write-Host "Repository Empty"
 
@@ -349,11 +493,11 @@ function View-Repository {
         $Version = "Unknown"
         $INF = "Unknown"
 
-        if (Test-Path $SummaryFile) {
+        if (Test-Path -LiteralPath $SummaryFile) {
 
-            $Lines = Get-Content $SummaryFile
+            $Lines = @(Get-Content -LiteralPath $SummaryFile)
 
-            for ($i=0; $i -lt $Lines.Count; $i++) {
+            for ($i = 0; $i -lt $Lines.Count - 1; $i++) {
 
                 if ($Lines[$i] -eq "Driver Version:") {
                     $Version = $Lines[$i+1]
@@ -380,34 +524,49 @@ function Extract-InstalledDriver {
 
     Clear-Host
 
-    Write-Host "Enumerating Installed Drivers..."
+    Write-Host "Enumerating Installed Third-Party Drivers..."
     Write-Host ""
 
-    $Drivers = Get-CimInstance Win32_PnPSignedDriver |
-        Where-Object { $_.DeviceName } |
-        Sort-Object DeviceName
+    # Only third-party (oemNN.inf) packages can be exported; inbox Windows
+    # drivers would just clutter the list.
+    $Drivers = @(Get-CimInstance Win32_PnPSignedDriver |
+        Where-Object { $_.DeviceName -and $_.InfName -match '^oem\d+\.inf$' } |
+        Sort-Object DeviceName)
 
-    for ($i=0; $i -lt $Drivers.Count; $i++) {
+    if ($Drivers.Count -eq 0) {
 
-        Write-Host "$($i+1). $($Drivers[$i].DeviceName)"
-    }
+        Write-Host "No third-party drivers found."
 
-    Write-Host ""
-
-    $Selection = Read-Host "Select Driver"
-
-    $Driver = $Drivers[[int]$Selection - 1]
-
-    if (!$Driver) {
+        Pause-Toolkit
         return
     }
+
+    for ($i = 0; $i -lt $Drivers.Count; $i++) {
+
+        $Driver = $Drivers[$i]
+
+        Write-Host "$($i+1). $($Driver.DeviceName)  [$($Driver.DriverProviderName) $($Driver.DriverVersion)]"
+    }
+
+    Write-Host ""
+
+    $Index = Read-Selection "Select Driver" $Drivers.Count
+
+    if ($null -eq $Index) {
+        Pause-Toolkit
+        return
+    }
+
+    $Driver = $Drivers[$Index]
+
+    $PnpDevice = Get-PnpDevice -InstanceId $Driver.DeviceID -ErrorAction SilentlyContinue
 
     $Device = [PSCustomObject]@{
         FriendlyName = $Driver.DeviceName
         Manufacturer = $Driver.Manufacturer
-        Status = "Installed"
-        Class = $Driver.DeviceClass
-        InstanceId = $Driver.DeviceID
+        Status       = if ($PnpDevice) { $PnpDevice.Status } else { "Installed" }
+        Class        = $Driver.DeviceClass
+        InstanceId   = $Driver.DeviceID
     }
 
     Export-DriverPackage $Device $Driver
@@ -432,26 +591,31 @@ function Show-Menu {
     Write-Host "6. Exit"
     Write-Host ""
 
-    Read-Host "Selection"
+    (Read-Host "Selection").Trim()
 }
 
 do {
 
     $Choice = Show-Menu
 
-    switch ($Choice) {
+    try {
+        switch ($Choice) {
 
-        "1" { Capture-NewDevice -USBOnly $true }
+            "1" { Capture-NewDevice -USBOnly $true }
 
-        "2" { Capture-NewDevice -USBOnly $false }
+            "2" { Capture-NewDevice -USBOnly $false }
 
-        "3" { Install-Driver }
+            "3" { Install-Driver }
 
-        "4" { View-Repository }
+            "4" { View-Repository }
 
-        "5" { Extract-InstalledDriver }
-
-        "6" { break }
+            "5" { Extract-InstalledDriver }
+        }
+    }
+    catch {
+        Write-Host ""
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        Pause-Toolkit
     }
 
-} while ($true)
+} while ($Choice -ne "6")
