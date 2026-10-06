@@ -18,18 +18,17 @@ Built for IT technicians who deal with hard-to-find drivers: printers, scanners,
 
 ## Quick Start
 
-1. Download `Driver-Extractor-Toolkit.ps1` into its own folder (a USB stick or network share works well).
-2. If the file came from the internet, unblock it:
+1. Download `Driver-Extractor-Toolkit.ps1` and `Launch-Driver-Extractor-Toolkit.bat` into the same folder (a USB stick or network share works well).
+2. Double-click `Launch-Driver-Extractor-Toolkit.bat` and choose **Yes** when Windows asks for administrator rights.
 
-   ```powershell
-   Unblock-File .\Driver-Extractor-Toolkit.ps1
-   ```
+The launcher bypasses the PowerShell execution policy for that run only, so there is no need to unblock the script or change any system settings. If Windows shows a security warning because the launcher came from the internet, choose **Run** (or **More info**, then **Run anyway**).
 
-3. Open PowerShell **as Administrator** and run:
+To run the script without the launcher, unblock it if it came from the internet, then open PowerShell **as Administrator** and run:
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Driver-Extractor-Toolkit.ps1
-   ```
+```powershell
+Unblock-File .\Driver-Extractor-Toolkit.ps1
+powershell -ExecutionPolicy Bypass -File .\Driver-Extractor-Toolkit.ps1
+```
 
 A `Drivers` folder is created next to the script the first time it runs. Every captured driver is saved there.
 
@@ -128,6 +127,7 @@ Useful when:
 ```text
 Driver Extractor Toolkit
 ├── Driver-Extractor-Toolkit.ps1
+├── Launch-Driver-Extractor-Toolkit.bat
 └── Drivers
     ├── Zebra Printer
     │   ├── DriverSummary.txt
@@ -327,6 +327,7 @@ Built-in Windows drivers (such as `usb.inf` or `msports.inf`) can't be exported,
 - Running in the PowerShell ISE? Live key presses aren't supported there, so the capture screen asks you to type the device number(s), press Enter to refresh, or type **Q** to return instead. A regular PowerShell window is recommended.
 - If Windows installs a generic driver, install the vendor driver first, then capture.
 - Capturing the same device again replaces its previous export.
+- Running from a mapped network drive (such as `Z:`)? Programs running as administrator can't see drives mapped by your normal account, so open the folder by its network path (such as `\\server\share\Toolkit`) instead.
 
 ## Requirements
 

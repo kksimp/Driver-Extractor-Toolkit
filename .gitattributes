@@ -1,0 +1,3 @@
+# Batch files need CRLF line endings. Store them as-is so both checkouts
+# and raw downloads from GitHub keep them.
+*.bat -text
